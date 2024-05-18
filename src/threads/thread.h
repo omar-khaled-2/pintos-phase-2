@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -82,24 +83,33 @@ typedef int tid_t;
    blocked state is on a semaphore wait list. */
 struct thread
   {
-    /* Owned by thread.c. */
-    tid_t tid;                          /* Thread identifier. */
-    enum thread_status status;          /* Thread state. */
-    char name[16];                      /* Name (for debugging purposes). */
-    uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
-    struct list_elem allelem;           /* List element for all threads list. */
+   /* Owned by thread.c. */
+   tid_t tid;                          /* Thread identifier. */
+   enum thread_status status;          /* Thread state. */
+   char name[16];                      /* Name (for debugging purposes). */
+   uint8_t *stack;                     /* Saved stack pointer. */
+   int priority;                       /* Priority. */
+   struct list_elem allelem;           /* List element for all threads list. */
+   struct list_elem elem; 
 
-    /* Shared between thread.c and synch.c. */
-    struct list_elem elem;              /* List element. */
 
-#ifdef USERPROG
-    /* Owned by userprog/process.c. */
-    uint32_t *pagedir;                  /* Page directory. */
-#endif
+   struct list files;        
+   struct file *exe_file;   
+   struct thread *parent;
+   struct list children;
+   struct list_elem child_elem;
 
-    /* Owned by thread.c. */
-    unsigned magic;                     /* Detects stack overflow. */
+            
+   struct condition waiting;       
+   tid_t awaited_thread_id;                                           
+   int exit_status;       
+   int child_status;
+   bool is_child_created;
+   uint32_t *pagedir;                    
+
+
+   /* Owned by thread.c. */
+   unsigned magic;                     /* Detects stack overflow. */
   };
 
 /* If false (default), use round-robin scheduler.
@@ -137,5 +147,18 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+struct user_file
+{
+   struct file *file;
+   struct list_elem elem;
+   int file_descriptor;
+};
+
+struct list_elem *get_max_priority_from_list(struct list *list);
+bool less_thread_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+
+
+struct lock waiting_lock;
 
 #endif /* threads/thread.h */
