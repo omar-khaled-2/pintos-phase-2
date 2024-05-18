@@ -31,6 +31,7 @@ process_execute (const char *file_name)
 {
     char *fn_copy;
     tid_t tid;
+    char *saveptr1;
     /* Make a copy of FILE_NAME.
     Otherwise there's a race between the caller and load(). */
 
@@ -43,25 +44,20 @@ process_execute (const char *file_name)
     /* Create a new thread to execute FILE_NAME. */
     tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
 
-    
-
-
-
     lock_acquire(&waiting_lock);
-    cond_wait(&thread_current()->waiting,&waiting_lock);
+    cond_wait(&thread_current()->waiting, &waiting_lock);
     lock_release(&waiting_lock);
 
     if(tid == TID_ERROR)
         palloc_free_page(fn_copy);
 
-    if(!thread_current()->is_child_created)
-      return TID_ERROR;
-    
-    
+    /* Child is loaded successfully */
+    if (thread_current()->is_child_created)
     return tid;
 
+    /* Error loading child*/
 
-    
+    return TID_ERROR;
 }
  
 /* A thread function that loads a user process and starts it
@@ -80,25 +76,22 @@ start_process (void *file_name_)
 
 
   success = load (file_name, &if_.eip, &if_.esp);
-    struct thread* child = thread_current();
-  struct thread* parent = child->parent;
-  parent->is_child_created = success;
+  struct thread* parent = thread_current()->parent;
 
   if(success){ 
 
       struct list* children = &parent->children;
-
-      
-      list_push_back(&parent->children,&child->child_elem); 
+      struct thread* child = thread_current();
+      list_push_back(children,&child->child_elem); 
+      parent->is_child_created = 1; 
       lock_acquire(&waiting_lock);
-      cond_signal(&parent->waiting,&waiting_lock);
-      cond_wait(&child->waiting,&waiting_lock);
+      cond_signal(&parent->waiting,&waiting_lock); 
+      cond_wait(&thread_current()->waiting,&waiting_lock); 
       lock_release(&waiting_lock);
-
   }else{ 
-        child->parent = NULL;
+        parent->is_child_created = 0;
         lock_acquire(&waiting_lock);
-        cond_signal(&parent->waiting,&waiting_lock);
+        cond_signal(&parent->waiting,&waiting_lock); 
         lock_release(&waiting_lock);
     }
 
@@ -125,35 +118,25 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t tid)
+process_wait (tid_t tid )
 {
-  struct thread* current = thread_current();
 
+    thread_current()-> awaited_thread_id = tid;
+    struct thread* child = return_child_with_tid(tid);// Get child with given tid_t
+         // validddd
+    if(child != NULL)
+    { 
 
-  struct thread* child = return_child_with_tid(tid);
-  if(child == NULL)
-    return -1;
+        list_remove(&child->child_elem); 
 
-  current->awaited_thread_id = tid;
+        lock_acquire(&waiting_lock);
+        cond_signal(&child->waiting,&waiting_lock); 
+        cond_wait(&thread_current()->waiting,&waiting_lock); 
+        lock_release(&waiting_lock);
+        return thread_current()->child_status; 
 
-  // child->parent = NULL;
-  list_remove(&child->child_elem);
-  
-  
-
-  lock_acquire(&waiting_lock);
-  cond_signal(&child->waiting,&waiting_lock); 
-  cond_wait(&current->waiting,&waiting_lock);
-  lock_release(&waiting_lock);
-
-  current->awaited_thread_id = -1;
-  
-
-
-  return current->child_status; 
-
-    
-
+    }
+    return -1;    //invalid 
 }
 
 
@@ -161,52 +144,58 @@ process_wait (tid_t tid)
 /* Free the current process's resources. */
 void
 process_exit (void) {
-    struct thread *current_thread = thread_current();
+    struct thread *cur = thread_current();
 
-    
-
-    if (current_thread->parent != NULL) {
-        struct thread *parent = current_thread->parent;
-
-        // list_remove(&current_thread->child_elem);
-        
-
-        
-
-        if (parent->awaited_thread_id == current_thread->tid){  
-            parent->child_status = current_thread->exit_status;   
+    if (cur->parent != NULL) 
+    {
+        struct thread *parent = cur->parent;
+        // Parent is waiting for me
+        if (parent->awaited_thread_id == cur->tid)
+         {  
+            parent->child_status = thread_current()->exit_status; // Set parent to my exit status
+            parent->awaited_thread_id = -1; // reset waiting for tid
+            parent->is_child_created = 0; // reset child creation success
             lock_acquire(&waiting_lock);
-            cond_signal(&parent->waiting,&waiting_lock);
+            cond_signal(&parent->waiting,&waiting_lock); // Wake up parent
             lock_release(&waiting_lock);
-      
         }
 
     }
 
-    file_close(current_thread->exe_file);
+    //// close executable file
+    file_close(thread_current()->exe_file);
 
-    current_thread->exe_file = NULL;
-    current_thread->parent = NULL;
+    thread_current()->exe_file = NULL;
+    thread_current()->parent = NULL;
 
 
-
-    while(!list_empty(&current_thread->files)){
-      struct user_file* f = list_entry(list_pop_back(&current_thread->files), struct user_file , elem);
-      file_close(f->file);
+    while(!list_empty(&thread_current()->files)){
+      struct user_file* file = list_entry(list_pop_front(&thread_current()->files), struct user_file , elem);
+      file_close(file->file);
+      free(file);
     }
 
-    while(!list_empty(&current_thread->children)){
-      struct thread* child = list_entry(list_pop_back(&current_thread->children), struct thread , child_elem);
-      child->parent = NULL;
-      
-    }
 
+
+    // Remove all children
+    struct list* all_children = &thread_current()->children;
+    struct list_elem * i = list_begin(all_children);
+    while(i != list_end(all_children))
+     {
+        struct thread * child = list_entry(i,struct thread , child_elem);
+        i = list_next(i);
+        child->parent = NULL;
+        lock_acquire(&waiting_lock);
+        cond_signal(&child->waiting,&waiting_lock);
+        lock_release(&waiting_lock);
+        list_remove(&child->child_elem);
+    }
 
     uint32_t *pd;
 
     /* Destroy the current process's page directory and switch back
        to the kernel-only page directory. */
-    pd = current_thread->pagedir;
+    pd = cur->pagedir;
 
     if (pd != NULL){
         /* Correct ordering here is crucial.  We must set
@@ -216,7 +205,7 @@ process_exit (void) {
            directory before destroying the process's page
            directory, or our active page directory will be one
            that's been freed (and cleared). */
-        current_thread->pagedir = NULL;
+        cur->pagedir = NULL;
         pagedir_activate(NULL);
         pagedir_destroy(pd);
     }
@@ -333,7 +322,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   int name_length = strlen (file_name)+1;
   fn_copy = malloc (name_length);
   strlcpy(fn_copy, file_name, name_length);
-  fn_copy = strtok_r (fn_copy, " ", &save_ptr);
+  fn_copy = strtok_r (fn_copy, " ", &save_ptr); // Copy of file name
 
  
   
@@ -366,6 +355,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done;
     }
 
+    /* Pointer to executable file */
     thread_current()->exe_file = file;
 
   /* Read program headers. */
@@ -427,11 +417,13 @@ load (const char *file_name, void (**eip) (void), void **esp)
         }
     }
  
+  /* Set up stack. */
   if (!setup_stack (esp))
     goto done;
 
+   /* Push stack args */
     push_stack_args(fn_copy, esp, &save_ptr);
-    free(fn_copy);
+    free(fn_copy); // free file name copy
  
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
@@ -441,7 +433,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
  done:
   /* We arrive here whether the load is successful or not. */
 
-   if(success)
+   if(success) // Loaded successfully
        file_deny_write(file);
 
   return success;
@@ -528,7 +520,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
  
       /* Get a page of memory. */
-      uint8_t *kpage =  (PAL_USER);
+      uint8_t *kpage = palloc_get_page (PAL_USER);
       if (kpage == NULL)
         return false;
  
@@ -593,24 +585,17 @@ install_page (void *upage, void *kpage, bool writable)
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
 }
 
-
 struct thread* return_child_with_tid(tid_t tid){
-
-
-
-    struct thread* current_thread = thread_current();
-
-
-    struct list* children = &current_thread->children;
-
-    for(struct list_elem* i = list_begin(children); i != list_end(children); i = list_next(i)){
-
-        struct thread* t = list_entry(i,struct thread, child_elem);
-        if(t->tid == tid){
-            return t;
+    struct thread* curr = thread_current();
+    struct list* children = &curr->children;
+    struct list_elem *i = list_begin(children);
+    while (i != list_end(children)){
+        struct thread *entry = list_entry(i,struct thread, child_elem);
+        i = list_next(i);
+        if(entry->tid == tid){
+            return entry;
         }
     }
-
     return NULL;
 }
  
@@ -622,7 +607,7 @@ void push_stack_args(char *file_name, void **esp, char **save_ptr)
     char * ptr = file_name;
     int total_size = 0;
 
-    
+
     while (ptr != NULL){
         stack_ptr -= (strlen(ptr) + 1);
         memcpy(stack_ptr, ptr, strlen(ptr) + 1);
@@ -637,10 +622,11 @@ void push_stack_args(char *file_name, void **esp, char **save_ptr)
         stack_ptr -= word_align;
         memset(stack_ptr, 0, word_align);
     }
-
+    /* Push NULL pointer at end of args */
     stack_ptr -= sizeof(char *);
     memset(stack_ptr,0,1);
 
+    /* Push addresses of args */
     for(int j=no_of_args-1;j>=0;j--)
     {
         stack_ptr -=  sizeof(char *);
@@ -656,7 +642,6 @@ void push_stack_args(char *file_name, void **esp, char **save_ptr)
 
     stack_ptr -= sizeof(int);
     *(int *)stack_ptr = no_of_args;
-
 
     stack_ptr -= sizeof(int *);
     *(int**)stack_ptr = 0;
